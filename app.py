@@ -201,9 +201,20 @@ def build_product_dim(fact_sales: pd.DataFrame) -> pd.DataFrame:
 def agg_units_per_store(fact_sales: pd.DataFrame, store_counts: pd.DataFrame) -> pd.DataFrame:
     if fact_sales.empty or store_counts.empty:
         return pd.DataFrame()
-    weekly_store = (
-        store_counts.groupby(["FiscalYear", "FiscalWeek"])["StoreCount"].sum().reset_index()
-    )
+    if "STORECOUNT" in store_counts.columns and store_counts["STORECOUNT"].notna().any():
+        weekly_store = (
+            store_counts.groupby(["FiscalYear", "FiscalWeek"])["STORECOUNT"]
+            .max()
+            .reset_index()
+            .rename(columns={"STORECOUNT": "WeeklyStoreCount"})
+        )
+    else:
+        weekly_store = (
+            store_counts.groupby(["FiscalYear", "FiscalWeek"])["StoreCount"]
+            .max()
+            .reset_index()
+            .rename(columns={"StoreCount": "WeeklyStoreCount"})
+        )
     fact = (
         fact_sales.groupby(["FiscalYear", "FiscalWeek", "PartNumber", "ItemNumber", "Description"])
         [["FW_Units", "FW_NetRtl"]]
@@ -211,7 +222,7 @@ def agg_units_per_store(fact_sales: pd.DataFrame, store_counts: pd.DataFrame) ->
         .reset_index()
     )
     merged = fact.merge(weekly_store, on=["FiscalYear", "FiscalWeek"], how="left")
-    merged["UnitsPerStore"] = merged["FW_Units"] / merged["StoreCount"]
+    merged["UnitsPerStore"] = merged["FW_Units"] / merged["WeeklyStoreCount"]
     return merged
 
 
@@ -264,9 +275,23 @@ def render_kpi_tiles(fact_sales: pd.DataFrame, fiscal_week: int):
 
 
 # ---------- Streamlit UI ----------
-st.set_page_config(page_title="AutoZone Actual Sales Dashboard", layout="wide")
-st.title("AutoZone Actual Sales Dashboard")
+st.set_page_config(page_title="Innova x AZ Sales Dashboard", layout="wide")
+st.title("Innova x AZ Sales Dashboard")
 st.caption("Actual-only view built from weekly Innova vendor reports (FW12 & FW13).")
+
+st.markdown(
+    """
+    <style>
+    div[data-testid="stMetric"] {
+        background-color: #f8f9fb;
+        border: 1px solid #dfe3e8;
+        border-radius: 8px;
+        padding: 12px 8px;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
 fact_sales = load_sales_fact()
 units_yoy = load_units_yoy()
@@ -495,6 +520,22 @@ with tab_overview:
 
 # ----- Store Counts -----
 with tab_store:
+    # Top 3 products by units/store (names only)
+    ups_top = agg_units_per_store(fact_sales, store_counts)
+    if ups_top.empty:
+        st.info("Store counts unavailable to derive top products.")
+    else:
+        filtered_top = ups_top[ups_top["FiscalWeek"].isin([12, 13])]
+        top_products = (
+            filtered_top.groupby("PartNumber")["UnitsPerStore"]
+            .mean()
+            .sort_values(ascending=False)
+            .head(3)
+        )
+        tcols = st.columns(3)
+        for idx, name in enumerate(top_products.index):
+            tcols[idx].metric(f"Top Units/Store #{idx+1}", name)
+
     st.subheader("Store Count Trend")
     if store_counts.empty:
         st.info("Historical Store Counts sheet is empty or missing.")
@@ -555,6 +596,25 @@ with tab_store:
                 f"Average units/store moved from {w12:.4f} (FW12) to {w13:.4f} (FW13)"
                 + (f" ({delta:+.1%})" if delta is not None else "")
             )
+        # Key metrics summary
+        top_avg = (
+            filtered.groupby("PartNumber")["UnitsPerStore"]
+            .mean()
+            .sort_values(ascending=False)
+            .head(1)
+        )
+        overall_avg = filtered["UnitsPerStore"].mean()
+        cols = st.columns(3)
+        if not filtered.empty:
+            cols[0].metric("Overall Avg Units/Store", f"{overall_avg:.3f}")
+        if not top_avg.empty:
+            top_names = top_avg.head(3)
+            tcols = cols[1].columns(len(top_names))
+            for idx, (name, _) in enumerate(top_names.items()):
+                tcols[idx].metric(f"Top Units/Store #{idx+1}", name)
+        if not filtered.empty:
+            w13_avg = filtered[filtered["FiscalWeek"] == 13]["UnitsPerStore"].mean()
+            cols[2].metric("Latest Week Units/Store", f"{w13_avg:.3f}", help="FW13 average")
 
 
 # ----- Profitability & Billbacks -----
